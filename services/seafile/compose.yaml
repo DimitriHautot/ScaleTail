@@ -77,6 +77,12 @@ services:
     image: ${SEAFILE_MEMCACHED_IMAGE:-memcached:1.6.29}
     container_name: app-${SERVICE}-memcached
     entrypoint: memcached -m 256
+    healthcheck:
+      test: ["CMD", "perl", "-MIO::Socket::INET", "-e", "my $$s = IO::Socket::INET->new('127.0.0.1:11211') or exit 1; print $$s \"version\\r\\n\"; exit((<$$s> // '') =~ /^VERSION/ ? 0 : 1)"] # Check if memcached answers; the image has no nc or HTTP client, and Alpine memcached tags have no perl
+      interval: 1m # How often to perform the check
+      timeout: 10s # Time to wait for the check to succeed
+      retries: 3 # Number of retries before marking as unhealthy
+      start_period: 30s # Time to wait before starting health checks
     restart: always
 
   seafile:
@@ -122,7 +128,7 @@ services:
       - SEAFILE_AI_SECRET_KEY=${JWT_PRIVATE_KEY:?Variable is not set or empty}
       - MD_FILE_COUNT_LIMIT=${MD_FILE_COUNT_LIMIT:-100000}
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:80 || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:80 || exit 1"] # Check if the service is responding
       interval: 30s
       timeout: 10s
       retries: 3
@@ -133,4 +139,4 @@ services:
       db:
         condition: service_healthy
       memcached:
-        condition: service_started
+        condition: service_healthy
