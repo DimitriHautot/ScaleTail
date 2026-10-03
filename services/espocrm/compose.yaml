@@ -8,8 +8,8 @@ configs:
       "AllowFunnel":{"$${TS_CERT_DOMAIN}:443":false}}
 
 services:
-# Make sure you have updated/checked the .env file with the correct variables. 
-# All the ${ xx } need to be defined there.
+# Make sure you have updated/checked the .env file with the correct variables.
+# Every variable used in this file must be defined there.
   # Tailscale Sidecar Configuration
   tailscale:
     image: tailscale/tailscale:latest # Image to be used
@@ -35,9 +35,9 @@ services:
     cap_add:
       - net_admin # Tailscale requirement
     #ports:
-    #  - 0.0.0.0:${SERVICEPORT}:${SERVICEPORT} # Binding port ${SERVICE}PORT to the local network - may be removed if only exposure to your Tailnet is required
+    #  - 0.0.0.0:${SERVICEPORT}:${SERVICEPORT} # Binding the service port to the local network - may be removed if only exposure to your Tailnet is required
     # If any DNS issues arise, use your preferred DNS provider by uncommenting the config below
-    #dns: 
+    #dns:
     #  - ${DNS_SERVER}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:41234/healthz"] # Check Tailscale has a Tailnet IP and is operational
@@ -47,35 +47,51 @@ services:
       start_period: 10s # Time to wait before starting health checks
     restart: always
 
-  # ${SERVICE}
+  # Application
+  database:
+    image: mariadb:12.2
+    container_name: db-${SERVICE}
+    environment:
+      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
+      - MARIADB_DATABASE=${MARIADB_DATABASE}
+      - MARIADB_USER=${MARIADB_USER}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+    volumes:
+      - ./${SERVICE}-db:/var/lib/mysql
+    restart: always
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"] # Check if MariaDB accepts TCP connections and InnoDB is initialized
+      interval: 1m
+      start_period: 30s
+      timeout: 10s
+      retries: 3
   application:
     image: ${IMAGE_URL}
-    container_name: app-${SERVICE}-hbbs # Name for local container management
-    network_mode: service:tailscale # Sidecar configuration to route ${SERVICE} through Tailscale
-    command: hbbs
-    volumes:
-      -  ./${SERVICE}-data/hbbs:/root
+    network_mode: service:tailscale # Sidecar configuration to route the service through Tailscale
+    container_name: app-${SERVICE}
     environment:
-      - PUID=1000
-      - PGID=1000
-      - ALWAYS_USE_RELAY=${ALWAYS_USE_RELAY}
+      - ESPOCRM_DATABASE_PLATFORM=${ESPOCRM_DATABASE_PLATFORM}
+      - ESPOCRM_DATABASE_HOST=${ESPOCRM_DATABASE_HOST}
+      - ESPOCRM_DATABASE_USER=${ESPOCRM_DATABASE_USER}
+      - ESPOCRM_DATABASE_PASSWORD=${ESPOCRM_DATABASE_PASSWORD}
+      - ESPOCRM_ADMIN_USERNAME=${ESPOCRM_ADMIN_USERNAME}
+      - ESPOCRM_ADMIN_PASSWORD=${ESPOCRM_ADMIN_PASSWORD}
+      - ESPOCRM_SITE_URL=${ESPOCRM_SITE_URL}
+      - ESPOCRM_DEFAULT_CURRENCY=${ESPOCRM_DEFAULT_CURRENCY}
+      - TZ=${TZ}
+    volumes: # EspoCRM 10 and later only need these directories mounted, not all of /var/www/html.
+      - ./${SERVICE}-data/data:/var/www/html/data
+      - ./${SERVICE}-data/custom:/var/www/html/custom
+      - ./${SERVICE}-data/client/custom:/var/www/html/client/custom
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:80/"] # Check if the service is responding
+      interval: 1m # How often to perform the check
+      timeout: 10s # Time to wait for the check to succeed
+      retries: 3 # Number of retries before marking as unhealthy
+      start_period: 30s # Time to wait before starting health checks
+    restart: always
     depends_on:
       tailscale:
         condition: service_healthy
-      hbbr: 
-        condition: service_started
-    # Healthcheck: none possible. The image contains only the hbbs and hbbr binaries, with no shell, HTTP client, or health command.
-    restart: always
-
-  hbbr:
-    image: ${IMAGE_URL}
-    container_name: app-${SERVICE}-hbbr # Name for local container management
-    command: hbbr
-    volumes:
-      -  ./${SERVICE}-data/hbbr:/root
-    environment:
-      - PUID=1000
-      - PGID=1000
-    network_mode: service:tailscale # Sidecar configuration to route ${SERVICE} through Tailscale
-    # Healthcheck: none possible. The image contains only the hbbs and hbbr binaries, with no shell, HTTP client, or health command.
-    restart: always
+      database:
+        condition: service_healthy

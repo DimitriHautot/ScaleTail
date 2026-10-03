@@ -4,12 +4,12 @@ configs:
       {"TCP":{"443":{"HTTPS":true}},
       "Web":{"$${TS_CERT_DOMAIN}:443":
           {"Handlers":{"/":
-          {"Proxy":"http://127.0.0.1:8080"}}}},
+          {"Proxy":"http://127.0.0.1:80"}}}},
       "AllowFunnel":{"$${TS_CERT_DOMAIN}:443":false}}
 
 services:
 # Make sure you have updated/checked the .env file with the correct variables.
-# All the ${ xx } need to be defined there.
+# Every variable used in this file must be defined there.
   # Tailscale Sidecar Configuration
   tailscale:
     image: tailscale/tailscale:latest # Image to be used
@@ -35,10 +35,10 @@ services:
     cap_add:
       - net_admin # Tailscale requirement
     #ports:
-    #  - 0.0.0.0:${SERVICEPORT}:8080 # Binding the host port to XWiki's container port
+    #  - 0.0.0.0:${SERVICEPORT}:${SERVICEPORT} # Binding the service port to the local network - may be removed if only exposure to your Tailnet is required
     # If any DNS issues arise, use your preferred DNS provider by uncommenting the config below
-    # dns:
-    #   - ${DNS_SERVER}
+    #dns:
+    #  - ${DNS_SERVER}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:41234/healthz"] # Check Tailscale has a Tailnet IP and is operational
       interval: 1m # How often to perform the check
@@ -47,53 +47,74 @@ services:
       start_period: 10s # Time to wait before starting health checks
     restart: always
 
-# ${SERVICE}
   application:
-    image: ${IMAGE_URL} # Image to be used
-    network_mode: service:tailscale # Sidecar configuration to route ${SERVICE} through Tailscale
-    container_name: app-${SERVICE} # Name for local container management
+    image: ${IMAGE_URL}
+    network_mode: service:tailscale
+    container_name: app-${SERVICE}
     depends_on:
       tailscale:
         condition: service_healthy
       db:
         condition: service_healthy
-    environment: # Variables are declared in .env file.
-      - XWIKI_VERSION=${XWIKI_VERSION}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_DATABASE=${DB_DATABASE}
-      - DB_HOST=db-${SERVICE}
-      - TZ=${TZ}
-    volumes:
-      - ./${SERVICE}-data/xwiki:/usr/local/xwiki
+      broker:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/rest/"] # Check if the service is responding
-      interval: 1m # How often to perform the check
-      timeout: 10s # Time to wait for the check to succeed
-      retries: 3 # Number of retries before marking as unhealthy
-      start_period: 120s # Time to wait before starting health checks
-    restart: always
-  db:
-    image: "mariadb:12"
-    container_name: db-${SERVICE}
-    volumes:
-      - ./${SERVICE}-data/mariadb:/var/lib/mysql
-      - type: bind
-        source: ./init.sql
-        target: /docker-entrypoint-initdb.d/init.sql
-    environment:
-      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
-      - MARIADB_USER=${DB_USER}
-      - MARIADB_PASSWORD=${DB_PASSWORD}
-      - MARIADB_DATABASE=${DB_DATABASE}
-    command:
-      - "--character-set-server=utf8mb4"
-      - "--collation-server=utf8mb4_bin"
-      - "--explicit-defaults-for-timestamp=1"
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"] # Check if MariaDB accepts TCP connections and InnoDB is initialized
+      test: ["CMD", "curl", "-fsS", "-L", "-o", "/dev/null", "http://localhost:80/"] # Check if the service is responding; overrides the image check, which targets port 8000 while this stack sets PAPERLESS_PORT=80. Uses localhost, the only host Paperless always accepts when PAPERLESS_ALLOWED_HOSTS is set
       interval: 1m # How often to perform the check
       timeout: 10s # Time to wait for the check to succeed
       retries: 3 # Number of retries before marking as unhealthy
       start_period: 30s # Time to wait before starting health checks
     restart: always
+    volumes:
+      - ./${SERVICE}-data/data:/usr/src/paperless/data
+      - ./${SERVICE}-data/media:/usr/src/paperless/media
+      - ./${SERVICE}-data/export:/usr/src/paperless/export
+      - ./${SERVICE}-data/consume:/usr/src/paperless/consume
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+      - PAPERLESS_TIME_ZONE=${PAPERLESS_TIME_ZONE}
+      - PAPERLESS_OCR_LANGUAGE=${PAPERLESS_OCR_LANGUAGE}
+      - PAPERLESS_SECRET_KEY=${PAPERLESS_SECRET_KEY}
+      - PAPERLESS_PORT=80
+      - PAPERLESS_PROXY_SSL_HEADER=["HTTP_X_FORWARDED_PROTO", "https"]
+      - PAPERLESS_ADMIN_USER=${PAPERLESS_ADMIN_USER}
+      - PAPERLESS_ADMIN_PASSWORD=${PAPERLESS_ADMIN_PASSWORD}
+      - PAPERLESS_REDIS=redis://broker:6379
+      - PAPERLESS_DBHOST=db
+  db:
+    image: docker.io/library/postgres:18
+    container_name: app-${SERVICE}-db # Name for local container management
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d paperless"] # Check if PostgreSQL accepts connections
+      interval: 1m # How often to perform the check
+      timeout: 10s # Time to wait for the check to succeed
+      retries: 3 # Number of retries before marking as unhealthy
+      start_period: 30s # Time to wait before starting health checks
+    restart: always
+    volumes:
+      - ./${SERVICE}-data/pgdata:/var/lib/postgresql
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+      - POSTGRES_DB=paperless
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  broker:
+    image: docker.io/library/redis:8
+    container_name: app-${SERVICE}-broker # Name for local container management
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"] # Check if Redis responds
+      interval: 1m # How often to perform the check
+      timeout: 10s # Time to wait for the check to succeed
+      retries: 3 # Number of retries before marking as unhealthy
+      start_period: 30s # Time to wait before starting health checks
+    restart: always
+    volumes:
+      - ./${SERVICE}-data/redisdata:/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
